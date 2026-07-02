@@ -88,26 +88,36 @@ def main():
 
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-    # --- 2. Find tasks matching project + stage + approved state ---
-    def count(domain):
-        return models.execute_kw(ODOO_DB, uid, ODOO_API_KEY,
-                                 MODEL, "search_count", [domain])
-
-    print("Tasks in project:", count([["project_id.name", "=", PROJECT_NAME]]))
-    print("...and in stage:", count([["project_id.name", "=", PROJECT_NAME],
-                                     ["stage_id.name", "=", STAGE_NAME]]))
-    print("...and approved:", count([["project_id.name", "=", PROJECT_NAME],
-                                     ["stage_id.name", "=", STAGE_NAME],
-                                     ["state", "=", TASK_STATE]]))
-
-    tasks = models.execute_kw(
+   # ---------- DIAGNOSTIC: what does Odoo actually have? ----------
+    # 1. Find the project (fuzzy match, case-insensitive)
+    projects = models.execute_kw(
         ODOO_DB, uid, ODOO_API_KEY,
-        MODEL, "search_read",
-        [[["project_id.name", "=", PROJECT_NAME],
-          ["stage_id.name", "=", STAGE_NAME],
-          ["state", "=", TASK_STATE]]],
-        {"fields": ["name", "partner_id", "user_ids"]},
+        "project.project", "search_read",
+        [[["name", "ilike", "presales"]]],
+        {"fields": ["id", "name"]},
     )
+    print("Projects containing 'presales':", projects)
+
+    if projects:
+        pid = projects[0]["id"]
+
+        # 2. List the stages that exist in that project
+        stages = models.execute_kw(
+            ODOO_DB, uid, ODOO_API_KEY,
+            "project.task.type", "search_read",
+            [[["project_ids", "in", [pid]]]],
+            {"fields": ["id", "name"]},
+        )
+        print("Stages in that project:", stages)
+
+        # 3. Show the states of tasks currently in that project
+        state_counts = models.execute_kw(
+            ODOO_DB, uid, ODOO_API_KEY,
+            "project.task", "read_group",
+            [[["project_id", "=", pid]], ["state"], ["state"]],
+        )
+        print("Task states in that project:", state_counts)
+    # ---------- END DIAGNOSTIC ----------
 
     # --- 3. Optionally drop tasks already reported in a past digest ---
     seen = load_seen()
