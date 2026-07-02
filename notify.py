@@ -3,9 +3,10 @@ Odoo -> Discord digest notifier
 Every run, posts ONE combined message listing matching project tasks.
 
 Matches tasks that are ALL of:
-  - in the "(PRES-BU) Presales" project
+  - in project id 20260  ("(PRES-BU) Presales " - note: name has a trailing
+    space in the database, which is why we filter by ID, not name)
   - in the "New" stage
-  - in the "Approved" task state (the green checkmark status)
+  - in the "Approved" task state (stored internally as "03_approved")
 
 Runs on a schedule (GitHub Actions, every 4 hours).
 """
@@ -25,16 +26,14 @@ ODOO_API_KEY = os.environ["ODOO_API_KEY"]
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
 # ---------------------------------------------------------------
-# EDIT THESE if your names change in Odoo
+# EDIT THESE if things change in Odoo
 # ---------------------------------------------------------------
 MODEL = "project.task"
-PROJECT_NAME = "(PRES-BU) Presales"  # exact project name as shown in Odoo
-STAGE_NAME = "New"                   # exact stage (kanban column) name
-TASK_STATE = "03_approved"           # internal code for the "Approved" state
+PROJECT_ID = 20260          # (PRES-BU) Presales — found via diagnostic
+STAGE_NAME = "New"          # exact stage (kanban column) name
+TASK_STATE = "03_approved"  # internal code for the "Approved" state
 
-# ONLY_NEW = False -> every digest lists ALL tasks currently matching
-#                     (same task can appear in multiple digests until it
-#                     leaves the stage/state).
+# ONLY_NEW = False -> every digest lists ALL tasks currently matching.
 # ONLY_NEW = True  -> each task is only ever included in one digest.
 ONLY_NEW = False
 
@@ -55,8 +54,7 @@ def save_seen(seen):
 
 
 def post_to_discord(text):
-    """Send one message. If it's too long for Discord, split into chunks
-    at line boundaries so nothing gets cut mid-task."""
+    """Send one message. If too long for Discord, split at line boundaries."""
     lines = text.split("\n")
     chunk = ""
     for line in lines:
@@ -88,36 +86,35 @@ def main():
 
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-   # ---------- DIAGNOSTIC: what does Odoo actually have? ----------
-    # 1. Find the project (fuzzy match, case-insensitive)
-    projects = models.execute_kw(
+    def count(domain):
+        return models.execute_kw(ODOO_DB, uid, ODOO_API_KEY,
+                                 MODEL, "search_count", [domain])
+
+    # --- Diagnostics (safe to delete once everything works) ---
+    stages = models.execute_kw(
         ODOO_DB, uid, ODOO_API_KEY,
-        "project.project", "search_read",
-        [[["name", "ilike", "presales"]]],
-        {"fields": ["id", "name"]},
+        "project.task.type", "search_read",
+        [[["project_ids", "in", [PROJECT_ID]]]],
+        {"fields": ["name"]},
     )
-    print("Projects containing 'presales':", projects)
+    print("Stages in project", PROJECT_ID, ":", [s["name"] for s in stages])
+    print("Counts -> project:", count([["project_id", "=", PROJECT_ID]]),
+          "| +stage:", count([["project_id", "=", PROJECT_ID],
+                              ["stage_id.name", "=", STAGE_NAME]]),
+          "| +approved:", count([["project_id", "=", PROJECT_ID],
+                                 ["stage_id.name", "=", STAGE_NAME],
+                                 ["state", "=", TASK_STATE]]))
+    # --- End diagnostics ---
 
-    if projects:
-        pid = projects[0]["id"]
-
-        # 2. List the stages that exist in that project
-        stages = models.execute_kw(
-            ODOO_DB, uid, ODOO_API_KEY,
-            "project.task.type", "search_read",
-            [[["project_ids", "in", [pid]]]],
-            {"fields": ["id", "name"]},
-        )
-        print("Stages in that project:", stages)
-
-        # 3. Show the states of tasks currently in that project
-        state_counts = models.execute_kw(
-            ODOO_DB, uid, ODOO_API_KEY,
-            "project.task", "read_group",
-            [[["project_id", "=", pid]], ["state"], ["state"]],
-        )
-        print("Task states in that project:", state_counts)
-    # ---------- END DIAGNOSTIC ----------
+    # --- 2. Find tasks matching project + stage + approved state ---
+    tasks = models.execute_kw(
+        ODOO_DB, uid, ODOO_API_KEY,
+        MODEL, "search_read",
+        [[["project_id", "=", PROJECT_ID],
+          ["stage_id.name", "=", STAGE_NAME],
+          ["state", "=", TASK_STATE]]],
+        {"fields": ["name", "partner_id", "user_ids"]},
+    )
 
     # --- 3. Optionally drop tasks already reported in a past digest ---
     seen = load_seen()
@@ -129,7 +126,7 @@ def main():
         return
 
     # --- 4. Look up all assignee names in one call ---
-    all_user_ids = sorted({uid_ for t in tasks for uid_ in t["user_ids"]})
+    all_user_ids = sorted({u for t in tasks for u in t["user_ids"]})
     user_names = {}
     if all_user_ids:
         for u in models.execute_kw(
@@ -140,7 +137,8 @@ def main():
             user_names[u["id"]] = u["name"]
 
     # --- 5. Build ONE digest message ---
-    lines = [f"📋 **Approved tasks in New — {PROJECT_NAME}** ({len(tasks)} task{'s' if len(tasks) != 1 else ''})", ""]
+    lines = [f"📋 **Approved tasks in New — (PRES-BU) Presales** "
+             f"({len(tasks)} task{'s' if len(tasks) != 1 else ''})", ""]
     for t in tasks:
         assignee = ", ".join(user_names[u] for u in t["user_ids"]) or "Unassigned"
         customer = t["partner_id"][1] if t["partner_id"] else "N/A"
