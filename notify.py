@@ -89,6 +89,17 @@ def main():
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
     # --- 2. Find tasks matching project + stage + approved state ---
+    def count(domain):
+        return models.execute_kw(ODOO_DB, uid, ODOO_API_KEY,
+                                 MODEL, "search_count", [domain])
+
+    print("Tasks in project:", count([["project_id.name", "=", PROJECT_NAME]]))
+    print("...and in stage:", count([["project_id.name", "=", PROJECT_NAME],
+                                     ["stage_id.name", "=", STAGE_NAME]]))
+    print("...and approved:", count([["project_id.name", "=", PROJECT_NAME],
+                                     ["stage_id.name", "=", STAGE_NAME],
+                                     ["state", "=", TASK_STATE]]))
+
     tasks = models.execute_kw(
         ODOO_DB, uid, ODOO_API_KEY,
         MODEL, "search_read",
