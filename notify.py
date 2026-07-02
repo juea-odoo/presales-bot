@@ -1,16 +1,17 @@
 """
 Odoo -> Discord digest notifier (embed edition)
-Every run, posts ONE rich embed listing matching project tasks.
+Every run, posts ONE rich embed digest of matching project tasks.
 
 Matches tasks that are ALL of:
   - in project id 20260 ("(PRES-BU) Presales")
-  - in the "New" stage
+  - in ANY of the stages listed in STAGE_NAMES
   - in the "Approved" task state (stored internally as "03_approved")
 
-Each task line shows: clickable task name (no link preview), assignee(s),
-and last-updated time rendered in each viewer's local timezone.
+Tasks are grouped by stage in the message. Each task line shows:
+clickable task name (no link preview), assignee(s), and last-updated
+time rendered in each viewer's local timezone.
 
-Runs on a schedule (GitHub Actions, every 4 hours).
+Runs on a schedule (GitHub Actions, every 2 hours).
 """
 
 import os
@@ -34,7 +35,7 @@ DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 MODEL = "project.task"
 PROJECT_ID = 20260          # (PRES-BU) Presales
 PROJECT_LABEL = "(PRES-BU) Presales"
-STAGE_NAME = "New"
+STAGE_NAMES = ["New", "Templates"]   # stages to check; order = display order
 TASK_STATE = "03_approved"  # internal code for the "Approved" state
 
 # ONLY_NEW = False -> every digest lists ALL tasks currently matching.
@@ -90,14 +91,14 @@ def main():
 
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-    # --- 2. Find matching tasks, most recently updated first ---
+    # --- 2. Find matching tasks in any watched stage ---
     tasks = models.execute_kw(
         ODOO_DB, uid, ODOO_API_KEY,
         MODEL, "search_read",
         [[["project_id", "=", PROJECT_ID],
-          ["stage_id.name", "=", STAGE_NAME],
+          ["stage_id.name", "in", STAGE_NAMES],
           ["state", "=", TASK_STATE]]],
-        {"fields": ["name", "user_ids", "write_date"],
+        {"fields": ["name", "user_ids", "write_date", "stage_id"],
          "order": "write_date desc"},
     )
 
@@ -121,24 +122,34 @@ def main():
         ):
             user_names[u["id"]] = u["name"]
 
-    # --- 5. Build embed(s) ---
-    # Each task renders as:
-    #   **[Task name](link)**
-    #   Assignee — updated 2 hours ago
-    # The [name](url) form inside an embed is clickable but NEVER
-    # produces a link preview.
-    task_lines = []
+    # --- 5. Group tasks by stage, in STAGE_NAMES order ---
+    by_stage = {name: [] for name in STAGE_NAMES}
     for t in tasks:
-        assignee = ", ".join(user_names[u] for u in t["user_ids"]) or "Unassigned"
-        updated = to_discord_timestamp(t["write_date"])
-        link = f"{ODOO_URL}/odoo/project/task/{t['id']}"
-        task_lines.append(f"**[{t['name']}]({link})**\n{assignee} — updated {updated}")
+        stage_name = t["stage_id"][1]  # [id, display name]
+        # match against watched names (stage display names can carry
+        # extra decoration; fall back to a contains check)
+        target = next((s for s in STAGE_NAMES if s == stage_name), None)
+        if target is None:
+            target = next((s for s in STAGE_NAMES if s in stage_name), stage_name)
+        by_stage.setdefault(target, []).append(t)
 
+    # --- 6. Build lines, one section per stage ---
+    task_lines = []
+    for stage in STAGE_NAMES:
+        stage_tasks = by_stage.get(stage, [])
+        if not stage_tasks:
+            continue
+        task_lines.append(f"__**{stage}**__ ({len(stage_tasks)})")
+        for t in stage_tasks:
+            assignee = ", ".join(user_names[u] for u in t["user_ids"]) or "Unassigned"
+            updated = to_discord_timestamp(t["write_date"])
+            link = f"{ODOO_URL}/odoo/project/task/{t['id']}"
+            task_lines.append(f"**[{t['name']}]({link})**\n{assignee} — updated {updated}")
+
+    header = f"**{len(tasks)} approved task{'s' if len(tasks) != 1 else ''}** across watched stages"
+
+    # Pack lines into embeds, respecting count and character limits
     embeds = []
-    header = (f"**{len(tasks)} task{'s' if len(tasks) != 1 else ''}** "
-              f"in **{STAGE_NAME}**, approved")
-
-    # Pack tasks into embeds, respecting count and character limits
     batch, batch_len = [], 0
     for line in task_lines:
         if len(batch) >= TASKS_PER_EMBED or batch_len + len(line) > EMBED_DESC_LIMIT:
@@ -156,13 +167,13 @@ def main():
             "color": EMBED_COLOR,
         }
         if i == 0:  # title/header only on the first card
-            embed["title"] = f"📋 {PROJECT_LABEL} — Approved in {STAGE_NAME}"
+            embed["title"] = f"📋 {PROJECT_LABEL} — Approved tasks"
             embed["description"] = header + "\n\n" + embed["description"]
         payload.append(embed)
 
     send_embeds(payload)
 
-    # --- 6. Remember what we reported (only matters if ONLY_NEW = True) ---
+    # --- 7. Remember what we reported (only matters if ONLY_NEW = True) ---
     seen.update(str(t["id"]) for t in tasks)
     save_seen(seen)
 
