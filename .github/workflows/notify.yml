@@ -2,7 +2,7 @@ name: Odoo to Discord digest
 
 on:
   schedule:
-    - cron: "0 12,14,17,19 * * *"   # 8am, 10am, 1pm, 3pm ET (EDT/UTC-4)
+    - cron: "13 12,14,17,19 * * *"   # 8am, 10am, 1pm, 3pm ET (EDT/UTC-4)
   workflow_dispatch: {}     # adds a "Run workflow" button so you can test manually
 
 permissions:
