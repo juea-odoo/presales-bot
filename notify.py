@@ -17,6 +17,7 @@ Runs on a schedule (GitHub Actions, every 2 hours).
 import os
 import json
 import xmlrpc.client
+import time
 from datetime import datetime, timezone
 import requests
 
@@ -83,11 +84,28 @@ def send_embeds(embeds):
 
 
 def main():
-    # --- 1. Log into Odoo ---
+# --- 1. Log into Odoo (retry on transient failures) ---
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
-    uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_API_KEY, {})
+    uid = None
+    last_error = None
+    MAX_LOGIN_ATTEMPTS = 3
+    LOGIN_RETRY_SECONDS = 5
+    for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
+        try:
+            uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_API_KEY, {})
+        except Exception as exc:
+            last_error = exc
+            uid = None
+        if uid:
+            break
+        print(f"Odoo login attempt {attempt}/{MAX_LOGIN_ATTEMPTS} failed"
+              + (f": {last_error}" if last_error else " (authenticate() returned no uid)"))
+        if attempt < MAX_LOGIN_ATTEMPTS:
+            time.sleep(LOGIN_RETRY_SECONDS)
     if not uid:
-        raise SystemExit("Odoo login failed — check ODOO_URL, DB, USER, API_KEY secrets")
+        raise SystemExit(
+            f"Odoo login failed after {MAX_LOGIN_ATTEMPTS} attempts — check ODOO_URL, DB, USER, API_KEY secrets. Last error: {last_error}"
+        )
 
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
